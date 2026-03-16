@@ -1,205 +1,250 @@
 # AgentForge
 
-Plateforme d'orchestration d'agents IA multi-agents, isolés par microVM (Kata Containers), avec versioning Git intégré via Forgejo self-hosted et tracing via LangFuse.
+**Plateforme d'orchestration d'agents IA multi-agents, isolée par microVM (Kata Containers),
+avec versioning Git intégré et dashboard web.**
+
+`License: MIT` | `Python 3.11+` | `Docker` | `LangGraph 1.x` | `LangFuse 4.x`
+
+---
 
 ## Vue d'ensemble
 
-AgentForge permet de soumettre une tâche de développement sous forme d'issue Git et d'obtenir automatiquement une Pull Request avec le code implémenté, testé et reviewé par un pipeline d'agents IA enchaînés.
+AgentForge permet de soumettre une tâche de développement sous forme d'issue Git et d'obtenir
+automatiquement une Pull Request avec le code implémenté, testé et reviewé par un pipeline
+d'agents IA enchaînés. Le système est 100 % open source et self-hosted — aucune dépendance
+cloud propriétaire. Chaque tâche s'exécute dans un container isolé (microVM Kata Containers
+avec fallback runc), les clés API ne sont jamais exposées aux agents.
 
-```
-Issue Forgejo  →  Orchestrateur  →  Kata Container (microVM)
-                                        └── LangGraph
-                                             ├── Supervisor
-                                             ├── Architect
-                                             ├── Coder      → commits
-                                             ├── Tester
-                                             └── Reviewer
-                                    →  Pull Request Forgejo
-```
-
-## Prérequis
-
-- Ubuntu 22.04 / 24.04 ou Debian 12
-- VPS ou machine physique avec support KVM (`/dev/kvm` présent)
-- RAM >= 4 GB (8 GB recommandé)
-- Disque >= 40 GB libre
-- Accès root ou sudo
-
-Vérifier le support KVM :
-```bash
-ls /dev/kvm && echo "KVM OK"
-# ou
-egrep -c '(vmx|svm)' /proc/cpuinfo  # doit retourner > 0
-```
-
-## Installation en une commande
-
-```bash
-git clone https://github.com/user/agentforge
-cd agentforge
-./install.sh
-```
-
-Le script installe automatiquement Docker, Kata Containers, configure la stack et lance tous les services.
+---
 
 ## Architecture
 
 ```
-Forgejo (port 3000)          — Forge Git self-hosted
-  ↕ webhook
-Orchestrateur (port 8000)    — Python FastAPI
-  ↕ spawn/destroy
-Kata Containers              — microVM par tâche (kernel isolé)
-  └── Agent Runtime          — LangGraph + agents Python
-       └── Proxy sidecar     — Injecte API keys (port 8877)
-LangFuse (port 3010)         — Tracing & observabilité
-PostgreSQL (interne)         — DB Forgejo + DB LangFuse
+Forgejo (Git self-hosted :3000)
+    ↕ webhooks / API REST
+Orchestrateur Python (:8000)
+    ↕ spawn / destroy
+Kata Containers (microVM par tâche, fallback runc)
+    └── LangGraph (graphe d'agents stateful)
+         ├── Supervisor   — analyse la tâche
+         ├── Architect    — lit le repo, planifie
+         ├── Coder        — implémente, git commit
+         ├── Tester       — exécute les tests
+         └── Reviewer     — valide ou itère (max 3x)
+Network Proxy sidecar (:8877)
+    └── Injecte les clés API (jamais exposées aux agents)
+LangFuse (tracing self-hosted :3010)
+Dashboard React + FastAPI (:3020)
+    ├── Setup Wizard
+    ├── Vue tâches / agents en temps réel
+    ├── Vue PRs (diff, merge, reject)
+    ├── Chat "Chef de projet" (SSE streaming)
+    └── Settings (clés API, modèles par agent)
 ```
 
-## Utilisation
+---
 
-### Lancer une tâche agent
+## Prérequis
 
-1. Ouvrir Forgejo sur `http://YOUR_IP:3000`
-2. Naviguer dans le repo `agentforge-workspace`
-3. Créer une issue avec le label **`agent-task`**
-4. Décrire la tâche dans le corps de l'issue
-5. L'orchestrateur reçoit le webhook, spawn une microVM et démarre le pipeline
-6. Suivre l'avancement dans LangFuse : `http://YOUR_IP:3010`
-7. La PR apparaît automatiquement dans Forgejo quand c'est terminé
+- **OS** : Ubuntu 22.04, Ubuntu 24.04, ou Debian 12
+- **RAM** : 4 GB minimum (8 GB recommandé)
+- **Disque** : 20 GB minimum
+- **CPU** : 2 cores minimum
+- **KVM** (optionnel) : requis pour l'isolation microVM Kata Containers.
+  Sans KVM, le système fonctionne avec runc (moins isolé mais entièrement fonctionnel).
+  Pour activer KVM sur un VPS : activez la virtualisation imbriquée dans le panneau de
+  contrôle de votre hébergeur.
+- Connexion internet pour le build des images Docker
 
-### Via Makefile
+---
+
+## Installation
 
 ```bash
-make test-task      # crée une issue de test et attend la PR
-make status         # état de tous les containers
-make logs           # logs de tous les services
-make logs-orch      # logs orchestrateur uniquement
+git clone https://github.com/neo-schobert/Agent-Forge.git
+cd Agent-Forge
+./install.sh
 ```
 
-## Stack technique
+Ce que fait `install.sh` :
 
-| Composant     | Technologie              | License         |
-|---------------|--------------------------|-----------------|
-| Git forge     | Forgejo                  | MIT             |
-| Isolation     | Kata Containers          | Apache 2.0      |
-| Agents        | LangGraph                | Apache 2.0      |
-| LLM           | Anthropic Claude (proxy) | —               |
-| Tracing       | LangFuse self-hosted     | MIT             |
-| Orchestrateur | Python 3.11 + FastAPI    | —               |
-| Proxy creds   | mitmproxy custom         | Apache 2.0      |
-| DB            | PostgreSQL               | PostgreSQL Lic. |
+1. Vérifie et installe les prérequis (Docker, buildx, dépendances système)
+2. Tente d'activer KVM / installe Kata Containers si possible
+3. Pose 6 questions de configuration (provider LLM, domaine, admin, email)
+4. Build les images Docker
+5. Démarre toute la stack (6 containers)
+6. Initialise Forgejo (compte admin, repo, webhook, labels)
+7. Initialise LangFuse (projet, clés API)
+8. Affiche les URLs d'accès
 
-100% open source, 100% self-hosted, zéro dépendance cloud propriétaire.
+À la fin de l'installation :
 
-## Configuration
+```
+Dashboard  : http://YOUR_IP:3020   ← configurer les clés API ici
+Forgejo    : http://YOUR_IP:3000
+LangFuse   : http://YOUR_IP:3010
+Orchestr.  : http://YOUR_IP:8000/health
+```
 
-Copier `.env.example` en `.env` et ajuster les valeurs :
+---
+
+## Premier démarrage
+
+Après installation, ouvrir `http://YOUR_IP:3020`.
+Le Setup Wizard s'affiche si les clés API ne sont pas configurées.
+
+- **Étape 1** : choisir le provider LLM (Anthropic / OpenAI / OpenRouter recommandé)
+- **Étape 2** : saisir la clé API et choisir les modèles par agent (si OpenRouter)
+- **Étape 3** : vérifier que tous les services sont up
+- **Étape 4** : cliquer "Lancer AgentForge"
+
+Pour créer une première tâche :
+
+- **Option A** — Via le dashboard : onglet Chat, décrire la tâche à l'agent
+- **Option B** — Via Forgejo : créer une issue avec le label `agent-task`
+- **Option C** — Via la CLI : `make test-task`
+
+---
+
+## Providers LLM supportés
+
+| Provider   | Variable             | Modèles supportés        |
+|------------|----------------------|--------------------------|
+| OpenRouter | OPENROUTER_API_KEY   | Tous (liste live)        |
+| Anthropic  | ANTHROPIC_API_KEY    | claude-* (directs)       |
+| OpenAI     | OPENAI_API_KEY       | gpt-* (directs)          |
+| Ollama     | OLLAMA_BASE_URL      | Modèles locaux           |
+
+Configuration par agent (OpenRouter uniquement) :
+Chaque agent peut utiliser un modèle différent, configuré depuis le dashboard.
+Variables : `AGENT_SUPERVISOR_MODEL`, `AGENT_ARCHITECT_MODEL`,
+`AGENT_CODER_MODEL`, `AGENT_TESTER_MODEL`, `AGENT_REVIEWER_MODEL`
+
+---
+
+## Makefile
 
 ```bash
-cp .env.example .env
-$EDITOR .env
+make start       # Démarrer la stack
+make stop        # Arrêter la stack
+make logs        # Logs de tous les services
+make logs-orch   # Logs orchestrateur uniquement
+make test-task   # Créer une issue de test et attendre la PR
+make clean       # Arrêter + supprimer les volumes
+make update      # git pull + rebuild images
+make status      # État de tous les containers
 ```
 
-Variables principales :
-
-| Variable               | Description                          |
-|------------------------|--------------------------------------|
-| `LLM_PROVIDER`         | `anthropic` ou `openai` ou `ollama`  |
-| `ANTHROPIC_API_KEY`    | Clé API Anthropic                    |
-| `OPENAI_API_KEY`       | Clé API OpenAI (alternatif)          |
-| `OLLAMA_BASE_URL`      | URL Ollama (alternatif local)        |
-| `FORGEJO_DOMAIN`       | Domaine ou IP du serveur Forgejo     |
-| `FORGEJO_ADMIN_USER`   | Login admin Forgejo                  |
-| `FORGEJO_ADMIN_PASS`   | Mot de passe admin Forgejo           |
-| `LANGFUSE_SECRET_KEY`  | Clé secrète LangFuse (auto-générée) |
-
-## Sécurité
-
-- Les clés API ne transitent **jamais** dans l'environnement des containers agents
-- Un proxy sidecar intercepte les appels LLM et injecte les credentials
-- Les containers utilisent Kata (kernel dédié), pas du Docker standard
-- Réseau des agents isolé : seul `api.anthropic.com` / `api.openai.com` est accessible en sortie
-- Whitelist stricte dans le proxy
-
-## Makefile — toutes les commandes
-
-```bash
-make start          # démarrer la stack
-make stop           # arrêter la stack
-make logs           # logs tous services
-make logs-orch      # logs orchestrateur
-make test-task      # smoke test end-to-end
-make clean          # stop + supprimer volumes
-make update         # git pull + rebuild
-make status         # état containers
-```
+---
 
 ## Structure du projet
 
 ```
-agentforge/
+Agent-Forge/
 ├── install.sh                    # Installation complète en une commande
-├── Makefile                      # Commandes de gestion
-├── docker-compose.yml            # Stack principale
+├── Makefile
+├── docker-compose.yml            # Stack : 6 services
 ├── .env.example                  # Template de configuration
 ├── config/
-│   ├── forgejo/app.ini           # Configuration Forgejo
-│   └── langfuse/                 # Config LangFuse
-├── orchestrator/                 # Service orchestrateur Python
-│   ├── main.py                   # Point d'entrée FastAPI
-│   ├── webhook_handler.py        # Traitement webhooks Forgejo
-│   ├── git_manager.py            # Opérations Git via API Forgejo
-│   ├── container_manager.py      # Spawn/destroy Kata Containers
-│   └── task_monitor.py           # Poll fichier sentinel
-├── agent_runtime/                # Runtime agents dans microVM
+│   └── forgejo/app.ini
+├── orchestrator/                 # FastAPI :8000
+│   ├── main.py
+│   ├── webhook_handler.py        # Pipeline webhook → container → PR
+│   ├── git_manager.py            # API Forgejo
+│   ├── container_manager.py      # Spawn/destroy Kata/runc
+│   └── task_monitor.py           # Poll sentinel + crash detection
+├── agent_runtime/                # Image Docker des agents
 │   ├── Dockerfile
-│   ├── main.py                   # Point d'entrée dans la microVM
-│   ├── graph.py                  # Graphe LangGraph
+│   ├── main.py                   # Proxy sidecar + LangGraph
+│   ├── graph.py                  # Graphe LangGraph + SqliteSaver
 │   ├── state.py                  # TaskState TypedDict
-│   └── agents/                   # Implémentation de chaque agent
-│       ├── supervisor.py
-│       ├── architect.py
-│       ├── coder.py
-│       ├── tester.py
-│       └── reviewer.py
-├── proxy/                        # Proxy HTTP sidecar (injection API keys)
+│   ├── agents/
+│   │   ├── supervisor.py
+│   │   ├── architect.py
+│   │   ├── coder.py
+│   │   ├── tester.py
+│   │   └── reviewer.py
+│   └── tools/
+│       ├── git_tools.py
+│       ├── file_tools.py
+│       └── shell_tools.py
+├── proxy/                        # Sidecar injection clés API
 │   ├── proxy.py
 │   └── Dockerfile
-├── scripts/                      # Scripts d'installation et de test
+├── dashboard/                    # React + FastAPI :3020
+│   ├── Dockerfile                # Multi-stage: node build → python serve
+│   ├── backend/
+│   │   ├── main.py
+│   │   ├── config.py
+│   │   └── routes/
+│   │       ├── tasks.py
+│   │       ├── system.py
+│   │       ├── forgejo.py
+│   │       ├── chat.py
+│   │       ├── settings.py
+│   │       └── models.py
+│   └── frontend/
+│       └── src/
+│           ├── App.jsx
+│           └── components/
+│               ├── SetupWizard.jsx
+│               ├── SystemStatus.jsx
+│               ├── TaskList.jsx
+│               ├── TaskDetail.jsx
+│               ├── PRViewer.jsx
+│               ├── Chat.jsx
+│               ├── Settings.jsx
+│               └── ModelSelector.jsx
+├── scripts/
 │   ├── setup_kata.sh
 │   ├── setup_forgejo.sh
 │   ├── setup_langfuse.sh
-│   └── test_task.sh
-└── docs/                         # Documentation
+│   ├── test_task.sh
+│   └── test_crash_recovery.sh
+└── docs/
     ├── architecture.md
     ├── how-it-works.md
+    ├── dashboard.md
     └── vps-notes.md
 ```
 
-## Dépannage
+---
 
-Voir `docs/vps-notes.md` pour les problèmes courants rencontrés sur VPS réels.
+## Fonctionnement du pipeline
 
-```bash
-# Vérifier que Kata est fonctionnel
-kata-runtime --version
-docker run --runtime kata-qemu hello-world
+1. L'utilisateur crée une tâche (dashboard chat ou issue Forgejo avec label `agent-task`)
+2. Forgejo envoie un webhook à l'orchestrateur
+3. L'orchestrateur crée une branche Git `task/{issue-number}-{slug}`
+4. Un container isolé (Kata microVM ou runc) est spawné avec le workspace
+5. LangGraph démarre le graphe : Supervisor → Architect → Coder → Tester → Reviewer
+6. Si Reviewer demande des corrections : retour au Coder (max 3 itérations)
+7. Le Coder commit chaque fichier modifié avec un message descriptif
+8. L'orchestrateur détecte la fin (fichier sentinel), pousse les commits, crée la PR
+9. La PR apparaît dans le dashboard pour review et merge
+10. En cas de crash mid-run : respawn automatique du container, reprise depuis le checkpoint
 
-# Vérifier les logs de l'orchestrateur
-make logs-orch
+---
 
-# Tester le webhook manuellement
-curl -X POST http://localhost:8000/health
-```
+## Sécurité
 
-## Contribuer
+- Les clés API ne transitent jamais dans l'environnement des agents
+- Le proxy sidecar intercepte les appels LLM et injecte les clés depuis `/run/secrets/`
+- Les agents ne peuvent pas exécuter de commandes système (whitelist stricte)
+- Chaque tâche tourne dans un container isolé avec limite de ressources
+- Les secrets ne sont jamais commités (protégés par `.gitignore`)
 
-1. Fork le projet
-2. Créer une branche (`git checkout -b feature/ma-feature`)
-3. Committer les changements
-4. Ouvrir une Pull Request
+---
 
-## License
+## Testé sur
 
-MIT — voir [LICENSE](LICENSE)
+- Ubuntu 22.04 LTS
+- Ubuntu 24.04 LTS
+- Debian 12
+- VPS sans KVM (mode runc fallback)
+- VPS avec KVM (mode Kata Containers)
+
+---
+
+## Licence
+
+MIT License — voir `LICENSE`

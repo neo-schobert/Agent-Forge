@@ -119,6 +119,30 @@ check_prerequisites() {
 # =============================================================================
 # ÉTAPE 1 — Installation Docker
 # =============================================================================
+install_buildx() {
+  if docker buildx version &>/dev/null; then
+    return 0
+  fi
+  log_info "Installation Docker buildx plugin..."
+  local buildx_url="https://api.github.com/repos/docker/buildx/releases/latest"
+  local buildx_ver
+  buildx_ver=$(curl -fsSL "$buildx_url" 2>/dev/null | grep tag_name | cut -d'"' -f4)
+  if [[ -z "$buildx_ver" ]]; then
+    log_warn "Impossible de récupérer la version de buildx — on continue sans"
+    return 0
+  fi
+  mkdir -p ~/.docker/cli-plugins
+  curl -fsSL \
+    "https://github.com/docker/buildx/releases/download/${buildx_ver}/buildx-${buildx_ver}.linux-amd64" \
+    -o ~/.docker/cli-plugins/docker-buildx 2>/dev/null || {
+    log_warn "Téléchargement buildx échoué — on continue sans"
+    return 0
+  }
+  chmod +x ~/.docker/cli-plugins/docker-buildx
+  docker buildx install 2>/dev/null || true
+  log_ok "Docker buildx installé : $(docker buildx version 2>/dev/null | head -1)"
+}
+
 install_docker() {
   log_step "Installation / vérification Docker"
 
@@ -166,40 +190,68 @@ install_docker() {
 
   # Test
   docker run --rm hello-world &>/dev/null && log_ok "Docker fonctionne correctement"
+
+  # Buildx
+  install_buildx
 }
 
 # =============================================================================
 # ÉTAPE 2 — Installation Kata Containers
 # =============================================================================
+install_kata_runtime() {
+  log_info "Installation Kata Containers..."
+  if snap install kata-containers --classic 2>/dev/null; then
+    log_ok "Kata Containers installé via snap"
+    sed -i 's/^KATA_AVAILABLE=.*/KATA_AVAILABLE=true/' "${ENV_FILE}" 2>/dev/null || \
+      echo "KATA_AVAILABLE=true" >> "${ENV_FILE}"
+    return 0
+  fi
+  # Fallback : script dédié (GitHub releases)
+  if bash "${SCRIPT_DIR}/scripts/setup_kata.sh" 2>/dev/null; then
+    if kata-runtime --version &>/dev/null || kata-qemu --version &>/dev/null; then
+      log_ok "Kata Containers installé via setup_kata.sh"
+      sed -i 's/^KATA_AVAILABLE=.*/KATA_AVAILABLE=true/' "${ENV_FILE}" 2>/dev/null || \
+        echo "KATA_AVAILABLE=true" >> "${ENV_FILE}"
+      return 0
+    fi
+  fi
+  log_warn "Installation Kata échouée — runc utilisé en fallback"
+  sed -i 's/^KATA_AVAILABLE=.*/KATA_AVAILABLE=false/' "${ENV_FILE}" 2>/dev/null || \
+    echo "KATA_AVAILABLE=false" >> "${ENV_FILE}"
+}
+
 install_kata() {
   log_step "Installation Kata Containers"
 
-  if [[ "${KVM_AVAILABLE}" == "false" ]]; then
-    log_warn "KVM non disponible — Kata Containers ne peut pas fonctionner."
-    log_warn "L'orchestrateur utilisera le runtime 'runc' standard (moins isolé)."
-    echo "KATA_AVAILABLE=false" >> "${ENV_FILE}"
-    return 0
-  fi
-
+  # Kata déjà installé ?
   if command -v kata-runtime &>/dev/null || command -v kata-qemu &>/dev/null; then
     KATA_VER=$(kata-runtime --version 2>/dev/null | head -1 || kata-qemu --version 2>/dev/null | head -1 || echo "inconnu")
     log_ok "Kata Containers déjà installé : ${KATA_VER}"
-    echo "KATA_AVAILABLE=true" >> "${ENV_FILE}"
+    sed -i 's/^KATA_AVAILABLE=.*/KATA_AVAILABLE=true/' "${ENV_FILE}" 2>/dev/null || \
+      echo "KATA_AVAILABLE=true" >> "${ENV_FILE}"
     return 0
   fi
 
-  source /etc/os-release
-  log_info "Installation de Kata Containers pour ${ID} ${VERSION_ID}..."
+  # Tenter d'activer KVM si le CPU supporte la virtualisation
+  if [[ ! -e /dev/kvm ]]; then
+    if grep -qE "vmx|svm" /proc/cpuinfo 2>/dev/null; then
+      log_info "CPU supporte la virt, tentative d'activation KVM..."
+      modprobe kvm 2>/dev/null || modprobe kvm-intel 2>/dev/null || modprobe kvm-amd 2>/dev/null || true
+      sleep 1
+    fi
+  fi
 
-  bash "${SCRIPT_DIR}/scripts/setup_kata.sh"
-
-  # Smoke test
-  if kata-runtime --version &>/dev/null || kata-qemu --version &>/dev/null; then
-    log_ok "Kata Containers installé avec succès"
-    echo "KATA_AVAILABLE=true" >> "${ENV_FILE}"
+  if [[ -e /dev/kvm ]]; then
+    log_ok "KVM disponible — installation Kata Containers..."
+    KVM_AVAILABLE=true
+    install_kata_runtime
   else
-    log_warn "Kata Containers installé mais smoke test échoué — vérifier manuellement."
-    echo "KATA_AVAILABLE=false" >> "${ENV_FILE}"
+    log_warn "KVM non disponible — Kata Containers désactivé"
+    log_warn "Isolation microVM indisponible, runc sera utilisé (moins sécurisé)"
+    log_info "Pour activer Kata sur un VPS : activez la virtualisation imbriquée"
+    log_info "dans le panneau de contrôle de votre hébergeur, puis relancez install.sh"
+    sed -i 's/^KATA_AVAILABLE=.*/KATA_AVAILABLE=false/' "${ENV_FILE}" 2>/dev/null || \
+      echo "KATA_AVAILABLE=false" >> "${ENV_FILE}"
   fi
 }
 
@@ -228,11 +280,22 @@ configure_env() {
 
   # --- LLM Provider ---
   echo -e "${YELLOW}--- Fournisseur LLM ---${NC}"
-  read -rp "LLM Provider (anthropic/openai/ollama) [anthropic]: " llm_provider
+  read -rp "LLM Provider (anthropic/openai/openrouter/ollama) [anthropic]: " llm_provider
   llm_provider="${llm_provider:-anthropic}"
   sed -i "s|^LLM_PROVIDER=.*|LLM_PROVIDER=${llm_provider}|" "${ENV_FILE}"
 
   case "${llm_provider}" in
+    openrouter)
+      read -rp "OPENROUTER_API_KEY (sk-or-...): " api_key
+      if [[ -n "${api_key}" ]]; then
+        sed -i "s|^OPENROUTER_API_KEY=.*|OPENROUTER_API_KEY=${api_key}|" "${ENV_FILE}"
+        echo -n "${api_key}" > "${SCRIPT_DIR}/secrets/llm_api_key"
+        chmod 600 "${SCRIPT_DIR}/secrets/llm_api_key"
+        log_ok "Clé OpenRouter enregistrée dans secrets/llm_api_key"
+      fi
+      read -rp "Modèle (ex: anthropic/claude-3-5-sonnet, openai/gpt-4o) [anthropic/claude-sonnet-4-5]: " llm_model
+      llm_model="${llm_model:-anthropic/claude-sonnet-4-5}"
+      ;;
     anthropic)
       read -rp "ANTHROPIC_API_KEY (sk-ant-...): " api_key
       if [[ -n "${api_key}" ]]; then
@@ -279,8 +342,15 @@ configure_env() {
   forgejo_domain="${forgejo_domain:-${PUBLIC_IP}}"
   sed -i "s|^FORGEJO_DOMAIN=.*|FORGEJO_DOMAIN=${forgejo_domain}|" "${ENV_FILE}"
 
-  read -rp "FORGEJO_ADMIN_USER [admin]: " forgejo_user
-  forgejo_user="${forgejo_user:-admin}"
+  while true; do
+    read -rp "FORGEJO_ADMIN_USER [agentforge]: " forgejo_user
+    forgejo_user="${forgejo_user:-agentforge}"
+    if [[ "${forgejo_user}" == "admin" ]]; then
+      log_error "Le nom 'admin' est réservé par Forgejo. Choisissez un autre nom."
+    else
+      break
+    fi
+  done
   sed -i "s|^FORGEJO_ADMIN_USER=.*|FORGEJO_ADMIN_USER=${forgejo_user}|" "${ENV_FILE}"
 
   while true; do
@@ -370,19 +440,19 @@ start_stack() {
 
   # Démarrer sans l'orchestrateur d'abord (Forgejo et LangFuse doivent être up)
   log_info "Démarrage PostgreSQL + Forgejo + LangFuse..."
-  docker compose --env-file "${ENV_FILE}" up -d postgres_forgejo postgres_langfuse forgejo langfuse
+  docker compose up -d postgres_forgejo postgres_langfuse forgejo langfuse
 
   # Attendre que Forgejo soit healthy
   log_info "Attente que Forgejo soit prêt (peut prendre 60s)..."
   TIMEOUT=120
   ELAPSED=0
-  while ! docker compose --env-file "${ENV_FILE}" exec -T forgejo \
+  while ! docker compose exec -T forgejo \
     curl -sf http://localhost:3000/api/healthz &>/dev/null; do
     sleep 5
     ELAPSED=$((ELAPSED + 5))
     if [[ ${ELAPSED} -ge ${TIMEOUT} ]]; then
       log_error "Forgejo n'a pas démarré après ${TIMEOUT}s"
-      docker compose --env-file "${ENV_FILE}" logs forgejo | tail -20
+      docker compose logs forgejo | tail -20
       exit 1
     fi
     log_info "  ... attente (${ELAPSED}/${TIMEOUT}s)"
@@ -392,7 +462,7 @@ start_stack() {
   # Attendre LangFuse
   log_info "Attente que LangFuse soit prêt..."
   ELAPSED=0
-  while ! docker compose --env-file "${ENV_FILE}" exec -T langfuse \
+  while ! docker compose exec -T langfuse \
     curl -sf http://localhost:3000/api/public/health &>/dev/null; do
     sleep 5
     ELAPSED=$((ELAPSED + 5))
@@ -428,7 +498,7 @@ start_orchestrator() {
   log_step "Démarrage de l'orchestrateur"
   cd "${SCRIPT_DIR}"
 
-  docker compose --env-file "${ENV_FILE}" up -d orchestrator
+  docker compose up -d orchestrator
 
   log_info "Attente que l'orchestrateur soit prêt..."
   TIMEOUT=60
