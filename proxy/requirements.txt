@@ -1,0 +1,12 @@
+# =============================================================================
+# AgentForge Proxy Sidecar — Dépendances Python
+# Proxy HTTP/HTTPS transparent qui injecte les clés API
+# =============================================================================
+
+# Proxy HTTP/HTTPS — mitmproxy pour l'interception HTTPS
+mitmproxy==10.3.1
+
+# Alternative légère si mitmproxy trop lourd : proxy HTTP simple
+# Utilisé en fallback si mitmproxy non disponible
+aiohttp==3.10.11
+aiohttp-socks==0.9.0

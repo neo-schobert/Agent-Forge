@@ -1,0 +1,128 @@
+# =============================================================================
+# AgentForge — .gitignore
+# =============================================================================
+
+# Secrets et configuration locale — NE JAMAIS COMMITTER
+.env
+secrets/*
+!secrets/.gitkeep
+
+# Clés privées et certificats
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Workspaces temporaires des tâches agents
+/tmp/agentforge-workspaces/
+workspaces/
+
+# Données persistantes Docker (volumes montés localement)
+data/
+volumes/
+forgejo-data/
+postgres-data/
+langfuse-data/
+
+# Checkpoints LangGraph
+*.checkpoint.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+logs/
+*.out
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Environnements virtuels Python
+.env/
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# Tests et coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Jupyter
+.ipynb_checkpoints
+
+# mypy / pyright / type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.pyre/
+
+# Node.js (pour éventuels outils frontend)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Fichiers de build Docker
+.dockerignore
+
+# Archives
+*.tar.gz
+*.zip
+*.bz2
+*.xz
+
+# Fichiers de résultat de tâche (générés dans workspaces)
+.task_done
+.task_result.json
+.task_error.json
