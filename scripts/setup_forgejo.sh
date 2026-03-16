@@ -64,10 +64,20 @@ forgejo_curl() {
 
 # Vérification que Forgejo répond
 wait_forgejo() {
-  local max=120 elapsed=0
+  local max=240 elapsed=0
   log_info "Vérification que Forgejo répond sur ${FORGEJO_BASE_URL}..."
-  while ! curl -s "${FORGEJO_BASE_URL}/api/healthz" &>/dev/null \
-     && ! wget -qO- "${FORGEJO_BASE_URL}/api/healthz" &>/dev/null; do
+  while true; do
+    # Essai 1 : URL externe via curl ou wget
+    if curl -sf "${FORGEJO_BASE_URL}/api/healthz" &>/dev/null \
+    || wget -qO- "${FORGEJO_BASE_URL}/api/healthz" &>/dev/null; then
+      break
+    fi
+    # Essai 2 : accès interne via docker exec (plus fiable au démarrage)
+    if docker exec agentforge_forgejo \
+        curl -sf http://localhost:3000/api/healthz &>/dev/null 2>&1; then
+      log_info "Forgejo répond en interne — API prête"
+      break
+    fi
     sleep 3
     elapsed=$((elapsed + 3))
     if [[ $elapsed -ge $max ]]; then

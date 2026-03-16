@@ -141,6 +141,7 @@ install_buildx() {
   }
   chmod +x ~/.docker/cli-plugins/docker-buildx
   docker buildx install 2>/dev/null || true
+  touch /tmp/.agentforge_installed_buildx
   log_ok "Docker buildx installé : $(docker buildx version 2>/dev/null | head -1)"
 }
 
@@ -175,6 +176,7 @@ install_docker() {
 
     systemctl enable docker
     systemctl start docker
+    touch /tmp/.agentforge_installed_docker
     log_ok "Docker installé"
   fi
 
@@ -218,6 +220,7 @@ install_kata_runtime() {
   log_info "Installation Kata Containers..."
   if snap install kata-containers --classic 2>/dev/null; then
     log_ok "Kata Containers installé via snap"
+    touch /tmp/.agentforge_installed_kata
     sed -i 's/^KATA_AVAILABLE=.*/KATA_AVAILABLE=true/' "${ENV_FILE}" 2>/dev/null || \
       echo "KATA_AVAILABLE=true" >> "${ENV_FILE}"
     return 0
@@ -226,6 +229,7 @@ install_kata_runtime() {
   if bash "${SCRIPT_DIR}/scripts/setup_kata.sh" 2>/dev/null; then
     if kata-runtime --version &>/dev/null || kata-qemu --version &>/dev/null; then
       log_ok "Kata Containers installé via setup_kata.sh"
+      touch /tmp/.agentforge_installed_kata
       sed -i 's/^KATA_AVAILABLE=.*/KATA_AVAILABLE=true/' "${ENV_FILE}" 2>/dev/null || \
         echo "KATA_AVAILABLE=true" >> "${ENV_FILE}"
       return 0
@@ -417,6 +421,7 @@ build_images() {
 
   # Créer le Dockerfile de l'orchestrateur s'il n'existe pas encore
   if [[ ! -f orchestrator/Dockerfile ]]; then
+    touch /tmp/.agentforge_generated_orchestrator_dockerfile
     cat > orchestrator/Dockerfile << 'DOCKERFILE'
 FROM python:3.11-slim
 WORKDIR /app
