@@ -131,20 +131,17 @@ def build_llm_for_agent(agent_name: str) -> Any:
 
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
-        import httpx
 
-        # Use a custom httpx client so we can inject the X-Agent-Name header
-        # on every request without touching the agent .py files.
-        http_client = httpx.Client(
-            headers={"X-Agent-Name": agent_name},
-            timeout=httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=5.0),
-        )
+        # Inject X-Agent-Name via default_headers so the proxy can route
+        # each agent to the correct model. Using default_headers (not http_client)
+        # because http_client gets forwarded to Messages.create() as a kwarg
+        # in langchain_anthropic >= 0.3 and causes a TypeError.
         return ChatAnthropic(
             model=model,
             # Dummy key — the proxy replaces it with the real secret
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", "proxy-injected"),
             anthropic_api_url=proxy_url,
-            http_client=http_client,
+            default_headers={"X-Agent-Name": agent_name},
             temperature=0,
             max_tokens=8192,
         )
@@ -348,11 +345,15 @@ def main() -> None:
         from graph import run_graph  # local import
 
         thread_id = f"task-{task_id}"
+        resume = os.environ.get("RESUME", "").lower() == "true"
+        if resume:
+            logger.info("resuming_from_checkpoint", task_id=task_id, thread_id=thread_id)
         final_state = run_graph(
             llms=llms,
             initial_state=initial_state,
             workspace_path=workspace_path,
             thread_id=thread_id,
+            resume=resume,
         )
 
         elapsed = time.time() - start_time

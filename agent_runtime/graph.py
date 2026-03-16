@@ -169,6 +169,7 @@ def run_graph(
     initial_state: TaskState,
     workspace_path: str,
     thread_id: str,
+    resume: bool = False,
 ) -> TaskState:
     """
     Execute the full agent pipeline for a given task.
@@ -179,6 +180,9 @@ def run_graph(
         initial_state: Initial TaskState with task_description, repo_path, etc.
         workspace_path: Path to the workspace directory (for SQLite checkpoint).
         thread_id: Unique run identifier used by the checkpointer.
+        resume: If True, resume from existing SQLite checkpoint instead of
+                starting fresh. Passes None as input to LangGraph so it loads
+                the last checkpointed state.
 
     Returns:
         Final TaskState after the graph has finished executing.
@@ -191,14 +195,24 @@ def run_graph(
         }
     }
 
-    logger.info(
-        "graph_run_start",
-        thread_id=thread_id,
-        task_preview=initial_state.get("task_description", "")[:100],
-        agents=list(llms.keys()),
-    )
+    if resume:
+        logger.info(
+            "graph_resume_from_checkpoint",
+            thread_id=thread_id,
+            checkpoint_path=os.path.join(workspace_path, ".checkpoint.db"),
+        )
+        # Passing None tells LangGraph to resume from the last checkpointed state
+        invoke_input = None
+    else:
+        logger.info(
+            "graph_run_start",
+            thread_id=thread_id,
+            task_preview=initial_state.get("task_description", "")[:100],
+            agents=list(llms.keys()),
+        )
+        invoke_input = initial_state
 
-    final_state = graph.invoke(initial_state, config=config)
+    final_state = graph.invoke(invoke_input, config=config)
 
     logger.info(
         "graph_run_complete",

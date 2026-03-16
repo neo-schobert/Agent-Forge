@@ -42,6 +42,7 @@ class ContainerManager:
         branch_name: str,
         repo_owner: str,
         repo_name: str,
+        resume: bool = False,
     ) -> str:
         """
         Spawner un container agent pour traiter la tâche.
@@ -86,6 +87,11 @@ class ContainerManager:
             "RESULT_FILE": "/workspace/.task_result.json",
             "ERROR_FILE": "/workspace/.task_error.json",
         }
+
+        # Crash recovery : signal au runtime de reprendre depuis le checkpoint
+        if resume:
+            env_vars["RESUME"] = "true"
+            log.info("container_resume_mode", task_id=task_id)
 
         # Volumes montés dans la microVM
         # IMPORTANT : les paths doivent être des paths HOST (pas container-internal)

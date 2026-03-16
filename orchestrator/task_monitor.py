@@ -107,6 +107,7 @@ class TaskMonitor:
                     log.warning("container_exited_unexpectedly")
                     return {
                         "success": False,
+                        "crash": True,
                         "error": "Container arrêté sans sentinel (crash probable)",
                     }
 

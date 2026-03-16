@@ -247,6 +247,39 @@ class WebhookHandler:
                 timeout=self.config.TASK_TIMEOUT_SECONDS,
             )
 
+            # --- Crash recovery : respawn si crash détecté ---
+            if result.get("crash"):
+                log.warning("crash_detected_respawning", task_id=task_id)
+                self.task_monitor.update_task(task_id, {"status": "resuming_after_crash", "crash_recovery": True})
+                # Commenter sur l'issue
+                try:
+                    await self.git_manager.post_issue_comment(
+                        repo_owner=repo_owner,
+                        repo_name=repo_name,
+                        issue_number=issue_number,
+                        comment="⚠️ Container arrêté inopinément. Reprise depuis le dernier checkpoint...",
+                    )
+                except Exception:
+                    pass
+                # Respawn avec RESUME=true — le runtime rechargera le checkpoint SQLite
+                container_id = await self.container_manager.spawn(
+                    task_id=task_id,
+                    workspace_path=workspace_path,
+                    task_description=task_description,
+                    issue_number=issue_number,
+                    branch_name=branch_name,
+                    repo_owner=repo_owner,
+                    repo_name=repo_name,
+                    resume=True,
+                )
+                log.info("container_respawned", container_id=container_id)
+                result = await self.task_monitor.wait_for_completion(
+                    task_id=task_id,
+                    workspace_path=workspace_path,
+                    container_id=container_id,
+                    timeout=self.config.TASK_TIMEOUT_SECONDS,
+                )
+
             if not result.get("success"):
                 raise RuntimeError(f"Pipeline agent échoué : {result.get('error', 'unknown')}")
 
