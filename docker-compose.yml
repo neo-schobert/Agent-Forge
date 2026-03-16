@@ -134,7 +134,8 @@ services:
     networks:
       - agentforge_net
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/public/health >/dev/null 2>&1 || exit 1"]
+      # Next.js ne bind pas sur 127.0.0.1 mais sur l'interface réseau du container
+      test: ["CMD-SHELL", "wget -qO- http://$(hostname):3000/api/public/health >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -197,7 +198,7 @@ services:
     networks:
       - agentforge_net
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
