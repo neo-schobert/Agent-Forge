@@ -1,11 +1,19 @@
 """
 graph.py — Définition du graphe LangGraph multi-agents
+
 Topologie : START → supervisor → architect? → coder → tester → reviewer → (coder | END)
 Checkpointing via SqliteSaver sur /workspace/.checkpoint.db
+
+Each node receives its own dedicated LLM from the `llms` dict:
+  llms["supervisor"], llms["architect"], llms["coder"],
+  llms["tester"],     llms["reviewer"]
+
+A "default" key is used as a safe fallback when a specific key is absent.
 """
 
 import os
-from typing import Literal
+import sqlite3
+from typing import Dict, Literal
 
 from langchain_core.language_models import BaseChatModel
 from langgraph.graph import StateGraph, START, END
@@ -22,63 +30,77 @@ from agents.reviewer import run_reviewer
 
 logger = structlog.get_logger()
 
-# Nombre max d'itérations Coder → Tester → Reviewer
+# Maximum number of Coder → Tester → Reviewer iterations before forced exit
 MAX_ITERATIONS = 3
 
 
-def build_graph(llm: BaseChatModel, workspace_path: str) -> StateGraph:
+def build_graph(llms: Dict[str, BaseChatModel], workspace_path: str) -> StateGraph:
     """
-    Construire et compiler le graphe LangGraph.
+    Construct and compile the LangGraph state machine.
 
     Args:
-        llm: Instance du modèle LLM à utiliser (Anthropic, OpenAI, Ollama)
-        workspace_path: Chemin du workspace (pour le checkpoint SQLite)
+        llms: Dict mapping agent names to their LLM instances.
+              Expected keys: supervisor, architect, coder, tester, reviewer.
+              Falls back to llms["default"] (or the first value) when a key
+              is missing.
+        workspace_path: Path to the workspace directory (used for SQLite checkpoint).
 
     Returns:
-        Graphe compilé avec checkpointing.
+        Compiled LangGraph with SQLite checkpointing.
     """
 
+    def _llm(name: str) -> BaseChatModel:
+        """Look up a per-agent LLM, falling back to 'default' then first value."""
+        if name in llms:
+            return llms[name]
+        if "default" in llms:
+            logger.warning("llm_fallback agent=%s using=default", name)
+            return llms["default"]
+        # Last resort: first value in the dict
+        first = next(iter(llms.values()))
+        logger.warning("llm_fallback agent=%s using=first_available", name)
+        return first
+
     # -------------------------------------------------------------------------
-    # Définir les nœuds (wrappers qui injectent le LLM)
+    # Node definitions — each closes over its specific LLM instance
     # -------------------------------------------------------------------------
 
     def supervisor_node(state: TaskState) -> dict:
-        return run_supervisor(state, llm)
+        return run_supervisor(state, _llm("supervisor"))
 
     def architect_node(state: TaskState) -> dict:
-        return run_architect(state, llm)
+        return run_architect(state, _llm("architect"))
 
     def coder_node(state: TaskState) -> dict:
-        return run_coder(state, llm)
+        return run_coder(state, _llm("coder"))
 
     def tester_node(state: TaskState) -> dict:
-        return run_tester(state, llm)
+        return run_tester(state, _llm("tester"))
 
     def reviewer_node(state: TaskState) -> dict:
-        return run_reviewer(state, llm)
+        return run_reviewer(state, _llm("reviewer"))
 
     # -------------------------------------------------------------------------
-    # Conditions de routing
+    # Routing conditions
     # -------------------------------------------------------------------------
 
     def route_after_supervisor(
         state: TaskState,
     ) -> Literal["architect", "coder"]:
-        """Après le Supervisor : aller à l'Architect ou directement au Coder."""
+        """After Supervisor: go to Architect for complex tasks, or skip to Coder."""
         if state.get("is_micro_task", False):
             logger.info("routing", from_="supervisor", to="coder", reason="micro_task")
             return "coder"
-        else:
-            logger.info("routing", from_="supervisor", to="architect")
-            return "architect"
+        logger.info("routing", from_="supervisor", to="architect")
+        return "architect"
 
     def route_after_reviewer(
         state: TaskState,
     ) -> Literal["coder", "__end__"]:
         """
-        Après le Reviewer :
-        - Si approuvé ou max iterations → END
-        - Sinon → retour au Coder avec le feedback
+        After Reviewer:
+        - Approved, done flag set, or max iterations reached → END
+        - Otherwise → back to Coder with review feedback
         """
         review_approved = state.get("review_approved", False)
         done = state.get("done", False)
@@ -93,40 +115,37 @@ def build_graph(llm: BaseChatModel, workspace_path: str) -> StateGraph:
                 iterations=iterations,
             )
             return END
-        else:
-            logger.info(
-                "routing",
-                from_="reviewer",
-                to="coder",
-                feedback_preview=state.get("review_feedback", "")[:50],
-            )
-            return "coder"
+        logger.info(
+            "routing",
+            from_="reviewer",
+            to="coder",
+            feedback_preview=state.get("review_feedback", "")[:50],
+        )
+        return "coder"
 
     # -------------------------------------------------------------------------
-    # Construire le graphe
+    # Build the graph
     # -------------------------------------------------------------------------
     graph = StateGraph(TaskState)
 
-    # Ajouter les nœuds
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("architect", architect_node)
     graph.add_node("coder", coder_node)
     graph.add_node("tester", tester_node)
     graph.add_node("reviewer", reviewer_node)
 
-    # Ajouter les arêtes fixes
+    # Fixed edges
     graph.add_edge(START, "supervisor")
     graph.add_edge("architect", "coder")
     graph.add_edge("coder", "tester")
     graph.add_edge("tester", "reviewer")
 
-    # Arêtes conditionnelles
+    # Conditional edges
     graph.add_conditional_edges(
         "supervisor",
         route_after_supervisor,
         {"architect": "architect", "coder": "coder"},
     )
-
     graph.add_conditional_edges(
         "reviewer",
         route_after_reviewer,
@@ -134,43 +153,37 @@ def build_graph(llm: BaseChatModel, workspace_path: str) -> StateGraph:
     )
 
     # -------------------------------------------------------------------------
-    # Configurer le checkpointing (SqliteSaver)
-    # LangGraph 1.x : SqliteSaver.from_conn_string() retourne un context manager.
-    # On doit l'utiliser via __enter__ pour le threading correct.
+    # SQLite checkpointing
     # -------------------------------------------------------------------------
     checkpoint_path = os.path.join(workspace_path, ".checkpoint.db")
-
-    # Ouvrir la connexion avec check_same_thread=False pour le threading LangGraph
-    import sqlite3
     conn = sqlite3.connect(checkpoint_path, check_same_thread=False)
     checkpointer = SqliteSaver(conn)
 
-    # Compiler le graphe avec checkpointing
     compiled = graph.compile(checkpointer=checkpointer)
-
-    logger.info("graph_compiled", checkpoint=checkpoint_path)
+    logger.info("graph_compiled", checkpoint=checkpoint_path, agents=list(llms.keys()))
     return compiled
 
 
 def run_graph(
-    llm: BaseChatModel,
+    llms: Dict[str, BaseChatModel],
     initial_state: TaskState,
     workspace_path: str,
     thread_id: str,
 ) -> TaskState:
     """
-    Exécuter le graphe complet avec une tâche donnée.
+    Execute the full agent pipeline for a given task.
 
     Args:
-        llm: Modèle LLM
-        initial_state: État initial avec task_description, repo_path, etc.
-        workspace_path: Chemin du workspace pour le checkpoint
-        thread_id: Identifiant unique du run (pour le checkpointing)
+        llms: Dict of per-agent LLM instances
+              (keys: supervisor, architect, coder, tester, reviewer, default).
+        initial_state: Initial TaskState with task_description, repo_path, etc.
+        workspace_path: Path to the workspace directory (for SQLite checkpoint).
+        thread_id: Unique run identifier used by the checkpointer.
 
     Returns:
-        État final après exécution du graphe.
+        Final TaskState after the graph has finished executing.
     """
-    graph = build_graph(llm, workspace_path)
+    graph = build_graph(llms, workspace_path)
 
     config = {
         "configurable": {
@@ -182,9 +195,9 @@ def run_graph(
         "graph_run_start",
         thread_id=thread_id,
         task_preview=initial_state.get("task_description", "")[:100],
+        agents=list(llms.keys()),
     )
 
-    # Invoquer le graphe
     final_state = graph.invoke(initial_state, config=config)
 
     logger.info(

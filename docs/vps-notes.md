@@ -302,12 +302,149 @@ curl -s http://localhost:8000/health
 # 4. LangFuse accessible
 curl -s http://localhost:3010/api/public/health
 
-# 5. Kata disponible (si KVM présent)
+# 5. Dashboard accessible
+curl -s http://localhost:3020/api/health
+
+# 6. Kata disponible (si KVM présent)
 docker run --runtime kata-qemu --rm alpine uname -r
 
-# 6. Secret LLM présent
-ls -la secrets/llm_api_key
+# 7. Secret LLM présent
+ls -la /run/secrets/llm_api_key
 
-# 7. Test end-to-end
+# 8. Test end-to-end
 make test-task
 ```
+
+---
+
+## Phase 2 — Dashboard web
+
+### Problème : Proxy sidecar CONNECT vs reverse proxy
+
+**Symptôme** : Le proxy en mode tunnel SSL (CONNECT) ne peut pas modifier
+le corps des requêtes JSON pour injecter le bon modèle par agent.
+
+**Cause** : En mode CONNECT, le SSL est établi entre le client et le serveur
+distant. Le proxy ne voit que des octets chiffrés — impossible de lire
+ni modifier le JSON.
+
+**Solution** : Réécriture du proxy en mode **reverse proxy HTTP** :
+- Les agents envoient des requêtes `http://localhost:8877` (non chiffré)
+- Le proxy lit le corps JSON, identifie le nom de l'agent via `X-Agent-Name`
+- Il remplace le champ `model` par `AGENT_{NAME}_MODEL` depuis les env vars
+- Il retransmet en HTTPS vers l'API réelle (Anthropic/OpenAI/OpenRouter)
+- La réponse (y compris streaming) est relayée mot par mot
+
+**Fichier** : `proxy/proxy.py` — classe `_handle_reverse_proxy()`
+
+---
+
+### Problème : Models list OpenRouter — ne pas hardcoder
+
+**Symptôme** : Toute liste hardcodée de modèles est obsolète en quelques semaines.
+Les prix changent sans préavis.
+
+**Solution** : Le dashboard appelle **en direct** `GET https://openrouter.ai/api/v1/models`
+à chaque chargement de la page Settings/Wizard. Aucun modèle ni prix n'est
+stocké côté serveur.
+
+**Fichier** : `dashboard/backend/routes/models.py`
+
+---
+
+### Problème : LangFuse healthcheck — hostname vs localhost
+
+**Symptôme** : `wget localhost:3000/api/public/health` échoue dans le container LangFuse.
+
+**Cause** : Next.js bind sur l'interface réseau du container (nom de l'hôte Docker),
+pas sur `127.0.0.1`.
+
+**Solution** dans `docker-compose.yml` :
+```yaml
+healthcheck:
+  test: ["CMD-SHELL", "wget -qO- http://$(hostname):3000/api/public/health >/dev/null 2>&1 || exit 1"]
+```
+
+---
+
+### Problème : Workspaces bind mount — même chemin host/container
+
+**Symptôme** : L'orchestrateur crée les workspaces dans son container.
+Docker daemon (sur le host) cherche ce chemin sur le HOST et crée un
+dossier vide. Le container agent ne trouve pas les fichiers.
+
+**Cause** : Quand l'orchestrateur fait `docker run -v /tmp/agentforge-workspaces/task1:/workspace`,
+Docker daemon résout ce chemin côté HOST. Si l'orchestrateur est lui-même dans
+un container avec un chemin différent, la synchronisation est perdue.
+
+**Solution** : Monter le dossier workspaces avec le **même chemin absolu** dans
+tous les containers ET sur le host :
+```yaml
+volumes:
+  - /tmp/agentforge-workspaces:/tmp/agentforge-workspaces
+```
+Et `WORKSPACES_DIR=/tmp/agentforge-workspaces` partout.
+
+---
+
+### Problème : SECRETS_HOST_PATH pour les containers agents
+
+**Symptôme** : L'orchestrateur monte `/run/secrets` (chemin interne container)
+comme volume Docker. Sur le host, ce chemin n'existe pas → erreur au spawn.
+
+**Solution** :
+1. Créer `/run/secrets/` sur le HOST avec la clé API
+2. Passer `SECRETS_HOST_PATH=/run/secrets` à l'orchestrateur
+3. `container_manager.py` utilise `SECRETS_HOST_PATH` pour le bind mount
+
+---
+
+### Problème : `@app.on_event` déprécié FastAPI 0.110+
+
+**Symptôme** : Warning `DeprecationWarning: on_event is deprecated`
+
+**Solution** : Migrer vers le pattern `lifespan` :
+```python
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # startup
+    yield
+    # shutdown
+
+app = FastAPI(lifespan=lifespan)
+```
+
+---
+
+### Problème : Token Forgejo via CLI (pas API REST)
+
+**Symptôme** : `POST /users/{user}/tokens` échoue avec "UserSignIn failed"
+même si les credentials sont corrects.
+
+**Cause** : `UserSignIn` est appelé en interne et peut échouer si
+`must_change_password=True` est défini sur le compte.
+
+**Solution** : Générer le token via CLI admin :
+```bash
+docker compose exec forgejo forgejo admin user generate-access-token \
+  --username agentforge \
+  --scopes "read:user,write:user,read:issue,write:issue,read:repository,write:repository" \
+  --raw
+```
+
+Les noms de scopes valides sont `read:user`, `write:issue`, etc.
+(pas `user`, `issue` sans préfixe).
+
+---
+
+### Performances Phase 2 (avec dashboard)
+
+| Composant | RAM supplémentaire |
+|-----------|-------------------|
+| Dashboard (FastAPI + React) | ~80 MB |
+| Build Node.js (npm install) | ~500 MB (temporaire) |
+| Image finale dashboard | ~250 MB |
+
+Le build multi-stage évite d'inclure Node.js dans l'image de production.

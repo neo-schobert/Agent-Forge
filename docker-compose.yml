@@ -203,3 +203,64 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Dashboard — Interface web React + FastAPI backend
+  # Accessible sur le port 3020
+  # ---------------------------------------------------------------------------
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: agentforge_dashboard
+    restart: unless-stopped
+    depends_on:
+      forgejo:
+        condition: service_healthy
+      orchestrator:
+        condition: service_healthy
+    environment:
+      # Services internes
+      FORGEJO_BASE_URL: "http://forgejo:3000"
+      ORCHESTRATOR_URL: "http://orchestrator:8000"
+      LANGFUSE_BASE_URL: "http://langfuse:3000"
+      # Forgejo auth
+      FORGEJO_API_TOKEN: ${FORGEJO_API_TOKEN:-}
+      FORGEJO_ADMIN_USER: ${FORGEJO_ADMIN_USER:-agentforge}
+      FORGEJO_ADMIN_PASS: ${FORGEJO_ADMIN_PASS:-}
+      FORGEJO_WORKSPACE_REPO: ${FORGEJO_WORKSPACE_REPO:-agentforge-workspace}
+      # LangFuse
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY_API: ${LANGFUSE_SECRET_KEY_API:-}
+      # LLM config
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # Per-agent models
+      AGENT_SUPERVISOR_MODEL: ${AGENT_SUPERVISOR_MODEL:-}
+      AGENT_ARCHITECT_MODEL: ${AGENT_ARCHITECT_MODEL:-}
+      AGENT_CODER_MODEL: ${AGENT_CODER_MODEL:-}
+      AGENT_TESTER_MODEL: ${AGENT_TESTER_MODEL:-}
+      AGENT_REVIEWER_MODEL: ${AGENT_REVIEWER_MODEL:-}
+      # Paths
+      ENV_FILE_PATH: /agentforge/.env
+      SECRETS_PATH: /run/secrets
+      DASHBOARD_PORT: ${DASHBOARD_PORT:-3020}
+      LOG_LEVEL: INFO
+    volumes:
+      # Accès en lecture/écriture au .env pour la mise à jour de la config
+      - ./.env:/agentforge/.env:rw
+      # Accès aux secrets pour mise à jour de la clé API
+      - /run/secrets:/run/secrets:rw
+    ports:
+      - "${DASHBOARD_PORT:-3020}:3020"
+    networks:
+      - agentforge_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3020/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
