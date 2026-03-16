@@ -44,11 +44,11 @@ class WebhookHandler:
 
         # 3. Déterminer le type d'événement
         event_type = headers.get("x-forgejo-event", headers.get("x-gitea-event", ""))
-        logger.info("webhook_received", event=event_type)
+        logger.info("webhook_received", event_type=event_type)
 
         # 4. Filtrer les événements pertinents
         if event_type not in ("issues", "issue"):
-            logger.debug("webhook_ignored", event=event_type, reason="not an issue event")
+            logger.debug("webhook_ignored", event_type=event_type, reason="not an issue event")
             return {"status": "ignored", "reason": f"event type '{event_type}' not handled"}
 
         # 5. Vérifier l'action (on traite seulement "opened" et "labeled")

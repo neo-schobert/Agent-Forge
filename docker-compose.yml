@@ -169,7 +169,11 @@ services:
       LANGFUSE_SECRET_KEY_API: ${LANGFUSE_SECRET_KEY_API:-}
       # Agent runtime
       AGENT_IMAGE: agentforge_agent_runtime:latest
-      WORKSPACES_DIR: ${WORKSPACES_DIR:-/workspaces}
+      # WORKSPACES_DIR doit être identique à l'intérieur et à l'extérieur du container
+      # pour que les bind mounts fonctionnent (Docker daemon résout les paths côté host)
+      WORKSPACES_DIR: ${WORKSPACES_DIR:-/tmp/agentforge-workspaces}
+      # Path côté host pour les secrets (pour le bind mount dans les containers agents)
+      SECRETS_HOST_PATH: ${SECRETS_HOST_PATH:-/run/secrets}
       TASK_TIMEOUT_SECONDS: ${TASK_TIMEOUT_SECONDS:-1800}
       KATA_AVAILABLE: ${KATA_AVAILABLE:-false}
       KATA_VCPUS: ${KATA_VCPUS:-2}
@@ -184,10 +188,10 @@ services:
     volumes:
       # Accès au socket Docker pour spawner les containers
       - /var/run/docker.sock:/var/run/docker.sock
-      # Dossier workspaces partagé entre orchestrateur et containers agents
-      - ${WORKSPACES_DIR:-/tmp/agentforge-workspaces}:/workspaces
-      # Secret LLM key monté en read-only (jamais dans les variables d'env agents)
-      - ./secrets:/run/secrets:ro
+      # Workspaces : même path sur host et dans le container (requis pour Docker-in-Docker)
+      - /tmp/agentforge-workspaces:/tmp/agentforge-workspaces
+      # Secrets : même path sur host et dans le container
+      - /run/secrets:/run/secrets:ro
     ports:
       - "${ORCHESTRATOR_PORT:-8000}:8000"
     networks:

@@ -50,12 +50,12 @@ forgejo_curl() {
   local extra_args=("$@")
 
   if [[ -n "${FORGEJO_API_TOKEN:-}" ]]; then
-    curl -sf -X "${method}" "${FORGEJO_API}${path}" \
+    curl -s -X "${method}" "${FORGEJO_API}${path}" \
       -H "Authorization: token ${FORGEJO_API_TOKEN}" \
       -H "Content-Type: application/json" \
       "${extra_args[@]}" 2>/dev/null
   else
-    curl -sf -X "${method}" "${FORGEJO_API}${path}" \
+    curl -s -X "${method}" "${FORGEJO_API}${path}" \
       -u "${FORGEJO_ADMIN_USER}:${FORGEJO_ADMIN_PASS}" \
       -H "Content-Type: application/json" \
       "${extra_args[@]}" 2>/dev/null
@@ -64,15 +64,17 @@ forgejo_curl() {
 
 # Vérification que Forgejo répond
 wait_forgejo() {
-  local max=60 elapsed=0
+  local max=120 elapsed=0
   log_info "Vérification que Forgejo répond sur ${FORGEJO_BASE_URL}..."
-  while ! curl -sf "${FORGEJO_BASE_URL}/api/healthz" &>/dev/null; do
+  while ! curl -s "${FORGEJO_BASE_URL}/api/healthz" &>/dev/null \
+     && ! wget -qO- "${FORGEJO_BASE_URL}/api/healthz" &>/dev/null; do
     sleep 3
     elapsed=$((elapsed + 3))
     if [[ $elapsed -ge $max ]]; then
       log_error "Forgejo ne répond pas après ${max}s"
       exit 1
     fi
+    log_info "  ... attente (${elapsed}/${max}s)"
   done
   log_ok "Forgejo accessible"
 }
@@ -83,31 +85,55 @@ wait_forgejo() {
 create_admin_account() {
   log_info "Vérification/création du compte admin Forgejo..."
 
-  # Tenter de se connecter
-  local response
-  response=$(curl -sf -u "${FORGEJO_ADMIN_USER}:${FORGEJO_ADMIN_PASS}" \
+  # IMPORTANT : "admin" est un nom réservé dans Forgejo (conflit avec /admin URL)
+  # Utiliser un nom différent comme "agentforge", "forge_admin", etc.
+  if [[ "${FORGEJO_ADMIN_USER}" == "admin" ]]; then
+    log_warn "Le nom 'admin' est réservé dans Forgejo. Changement en 'agentforge'."
+    FORGEJO_ADMIN_USER="agentforge"
+    # Mettre à jour .env si possible
+    sed -i "s|^FORGEJO_ADMIN_USER=.*|FORGEJO_ADMIN_USER=agentforge|" "${SCRIPT_DIR}/.env" 2>/dev/null || true
+  fi
+
+  # Tenter de se connecter (sans -f pour éviter exit code 22)
+  local http_code
+  http_code=$(curl -s -u "${FORGEJO_ADMIN_USER}:${FORGEJO_ADMIN_PASS}" \
     "${FORGEJO_API}/user" -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
 
-  if [[ "${response}" == "200" ]]; then
+  if [[ "${http_code}" == "200" ]]; then
     log_ok "Compte admin '${FORGEJO_ADMIN_USER}' déjà existant"
+    # S'assurer que must_change_password est false (requis pour la génération de token)
+    docker exec --user git agentforge_forgejo \
+      forgejo admin user change-password \
+      --username "${FORGEJO_ADMIN_USER}" \
+      --password "${FORGEJO_ADMIN_PASS}" \
+      --must-change-password=false 2>/dev/null || true
     return 0
   fi
 
   log_info "Création du compte admin via CLI Forgejo (dans le container)..."
-  # Forgejo expose une commande admin via gitea CLI dans le container
-  docker exec agentforge_forgejo \
+  # IMPORTANT : doit tourner en tant que 'git' (pas root) dans le container Forgejo
+  docker exec --user git agentforge_forgejo \
     gitea admin user create \
     --username "${FORGEJO_ADMIN_USER}" \
     --password "${FORGEJO_ADMIN_PASS}" \
     --email "${FORGEJO_ADMIN_EMAIL}" \
     --admin \
     --must-change-password=false 2>/dev/null || {
-      log_warn "gitea admin user create échoué — le compte existe peut-être déjà"
+      # Forgejo peut aussi s'appeler 'forgejo' selon la version de l'image
+      docker exec --user git agentforge_forgejo \
+        forgejo admin user create \
+        --username "${FORGEJO_ADMIN_USER}" \
+        --password "${FORGEJO_ADMIN_PASS}" \
+        --email "${FORGEJO_ADMIN_EMAIL}" \
+        --admin \
+        --must-change-password=false 2>/dev/null || {
+          log_warn "Création compte CLI échouée — le compte existe peut-être déjà"
+        }
     }
 
   # Vérifier
   local check
-  check=$(curl -sf -u "${FORGEJO_ADMIN_USER}:${FORGEJO_ADMIN_PASS}" \
+  check=$(curl -s -u "${FORGEJO_ADMIN_USER}:${FORGEJO_ADMIN_PASS}" \
     "${FORGEJO_API}/user" -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
 
   if [[ "${check}" == "200" ]]; then
@@ -123,30 +149,56 @@ create_admin_account() {
 generate_api_token() {
   log_info "Génération du token API Forgejo..."
 
-  # Supprimer l'ancien token s'il existe
-  curl -sf -X DELETE \
-    -u "${FORGEJO_ADMIN_USER}:${FORGEJO_ADMIN_PASS}" \
-    "${FORGEJO_API}/users/${FORGEJO_ADMIN_USER}/tokens/agentforge" \
-    -H "Content-Type: application/json" &>/dev/null || true
+  # Vérifier que le mot de passe ne nécessite pas de changement forcé
+  # (Forgejo CLI change-password met must_change_password=true par défaut)
+  docker exec --user git agentforge_forgejo \
+    forgejo admin user change-password \
+    --username "${FORGEJO_ADMIN_USER}" \
+    --password "${FORGEJO_ADMIN_PASS}" \
+    --must-change-password=false 2>/dev/null || true
 
-  # Créer un nouveau token
-  local token_response
-  token_response=$(curl -sf -X POST \
-    -u "${FORGEJO_ADMIN_USER}:${FORGEJO_ADMIN_PASS}" \
-    "${FORGEJO_API}/users/${FORGEJO_ADMIN_USER}/tokens" \
-    -H "Content-Type: application/json" \
-    -d '{"name": "agentforge", "scopes": ["issue", "repository", "user"]}' 2>/dev/null)
+  # Utiliser la CLI Forgejo pour générer le token (évite le bug UserSignIn)
+  # Supprimer le token existant s'il y en a un (via nom unique)
+  local token
+  token=$(docker exec --user git agentforge_forgejo \
+    forgejo admin user generate-access-token \
+    --username "${FORGEJO_ADMIN_USER}" \
+    --token-name "agentforge" \
+    --scopes "read:user,write:user,read:issue,write:issue,read:repository,write:repository" \
+    --raw 2>/dev/null || echo "")
 
-  if [[ -z "${token_response}" ]]; then
-    log_warn "Création token échouée — utilisation user:pass pour les appels suivants"
-    return 0
+  # Si le token existe déjà (nom pris), supprimer via API et recréer
+  if [[ -z "${token}" ]] || echo "${token}" | grep -q "already"; then
+    log_info "Token existant détecté — suppression et recréation..."
+    # Supprimer l'ancien token via API (sans must_change_password restriction)
+    curl -s -X DELETE \
+      -H "Authorization: token ${FORGEJO_API_TOKEN:-}" \
+      "${FORGEJO_API}/users/${FORGEJO_ADMIN_USER}/tokens/agentforge" \
+      &>/dev/null || true
+    # Retenter avec un nouveau nom temporaire puis supprimer
+    local tmp_token
+    tmp_token=$(docker exec --user git agentforge_forgejo \
+      forgejo admin user generate-access-token \
+      --username "${FORGEJO_ADMIN_USER}" \
+      --token-name "agentforge-tmp" \
+      --scopes "read:user,write:user,read:issue,write:issue,read:repository,write:repository" \
+      --raw 2>/dev/null || echo "")
+    if [[ -n "${tmp_token}" ]] && ! echo "${tmp_token}" | grep -q "Command error"; then
+      # Utiliser le token tmp pour supprimer agentforge et recréer
+      curl -s -X DELETE \
+        -H "Authorization: token ${tmp_token}" \
+        "${FORGEJO_API}/users/${FORGEJO_ADMIN_USER}/tokens/agentforge" \
+        &>/dev/null || true
+      token=$(docker exec --user git agentforge_forgejo \
+        forgejo admin user generate-access-token \
+        --username "${FORGEJO_ADMIN_USER}" \
+        --token-name "agentforge" \
+        --scopes "read:user,write:user,read:issue,write:issue,read:repository,write:repository" \
+        --raw 2>/dev/null || echo "${tmp_token}")
+    fi
   fi
 
-  local token
-  token=$(echo "${token_response}" | python3 -c "import sys,json; print(json.load(sys.stdin)['sha1'])" 2>/dev/null \
-          || echo "${token_response}" | grep -o '"sha1":"[^"]*"' | cut -d'"' -f4)
-
-  if [[ -n "${token}" ]]; then
+  if [[ -n "${token}" ]] && ! echo "${token}" | grep -q "Command error"; then
     FORGEJO_API_TOKEN="${token}"
     # Mettre à jour .env
     if grep -q "^FORGEJO_API_TOKEN=" "${ENV_FILE}" 2>/dev/null; then
@@ -156,7 +208,8 @@ generate_api_token() {
     fi
     log_ok "Token API Forgejo enregistré dans .env"
   else
-    log_warn "Impossible d'extraire le token — vérifier manuellement"
+    log_warn "Impossible de générer le token — vérifier manuellement"
+    log_warn "  Réponse: ${token:-vide}"
   fi
 }
 

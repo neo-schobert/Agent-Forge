@@ -88,10 +88,15 @@ class ContainerManager:
         }
 
         # Volumes montés dans la microVM
+        # IMPORTANT : les paths doivent être des paths HOST (pas container-internal)
+        # puisque Docker daemon résout les paths côté host
+        secrets_host_path = os.getenv("SECRETS_HOST_PATH", "/run/secrets")
         volumes = {
             workspace_path: {"bind": "/workspace", "mode": "rw"},
-            "/run/secrets": {"bind": "/run/secrets", "mode": "ro"},
         }
+        # Monter les secrets seulement si le répertoire existe sur le host
+        if os.path.isdir(secrets_host_path):
+            volumes[secrets_host_path] = {"bind": "/run/secrets", "mode": "ro"}
 
         # Limits de ressources
         mem_limit = f"{self.config.KATA_RAM_MB}m"

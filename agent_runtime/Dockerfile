@@ -34,6 +34,14 @@ RUN pip install --no-cache-dir --upgrade pip \
 # Copier le code du runtime agent
 COPY . .
 
+# Créer le répertoire du proxy sidecar et y placer le script
+# (proxy.py est copié depuis agent_runtime/proxy.py dans le contexte de build)
+RUN mkdir -p /app/proxy && \
+    if [ -f /app/proxy.py ]; then mv /app/proxy.py /app/proxy/proxy.py; fi
+
+# Installer les dépendances du proxy sidecar (aiohttp si présent dans proxy/requirements.txt)
+# Le proxy n'a besoin que d'aiohttp — déjà installé via requirements.txt de langchain
+
 # Le workspace sera monté en bind mount depuis l'orchestrateur
 # Point de montage attendu : /workspace
 RUN mkdir -p /workspace

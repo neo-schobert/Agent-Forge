@@ -45,6 +45,10 @@ def start_proxy_sidecar() -> subprocess.Popen:
                 break
         else:
             logger.warning("proxy_script_not_found", tried=[proxy_script])
+            # Supprimer les env vars proxy pour éviter que toutes les connexions HTTPS
+            # tentent de passer par un proxy inexistant (ConnectionRefusedError)
+            for proxy_var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+                os.environ.pop(proxy_var, None)
             return None
 
     proxy_port = os.getenv("PROXY_PORT", "8877")
