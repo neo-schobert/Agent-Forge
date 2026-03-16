@@ -448,3 +448,93 @@ Les noms de scopes valides sont `read:user`, `write:issue`, etc.
 | Image finale dashboard | ~250 MB |
 
 Le build multi-stage évite d'inclure Node.js dans l'image de production.
+
+---
+
+### Problème : `http_client` non supporté dans `ChatAnthropic` >= 0.3
+
+**Symptôme** : `TypeError: Messages.create() got an unexpected keyword argument 'http_client'`
+
+**Cause** : Dans `langchain-anthropic >= 0.3`, les paramètres inconnus passés au constructeur
+sont placés dans `model_kwargs` et transmis à `Messages.create()` lors de chaque appel.
+`http_client` est un paramètre du client SDK mais pas de `Messages.create()`, d'où le TypeError.
+
+**Solution** : Utiliser `default_headers` à la place de `http_client` pour injecter des headers
+personnalisés (ex: `X-Agent-Name`) :
+```python
+# AVANT (cassé avec langchain-anthropic >= 0.3)
+return ChatAnthropic(
+    ...
+    http_client=httpx.Client(headers={"X-Agent-Name": agent_name}),
+)
+
+# APRÈS (correct)
+return ChatAnthropic(
+    ...
+    default_headers={"X-Agent-Name": agent_name},
+)
+```
+
+**Fichier** : `agent_runtime/main.py` — `build_llm_for_agent()`
+
+---
+
+### Problème : Conflit de nom de container lors du respawn (409 Conflict)
+
+**Symptôme** : `docker.errors.APIError: 409 Conflict — The container name "agentforge_task_X" is already in use`
+
+**Cause** : `docker kill` arrête le container mais ne le supprime pas. La ré-utilisation
+du même nom (`containers.run(name=...)`) échoue car le nom est encore enregistré.
+
+**Solution** : Supprimer l'ancien container avant le respawn :
+```python
+if resume:
+    try:
+        old = self.docker_client.containers.get(container_name)
+        old.remove(force=True)
+    except Exception:
+        pass  # container already gone — fine
+```
+
+**Fichier** : `orchestrator/container_manager.py` — méthode `spawn()`
+
+---
+
+### Problème : Codes ANSI dans les variables bash capturées avec `$()`
+
+**Symptôme** : `grep: Unmatched [, [^, [:, [., or [=` lors de tests shell
+
+**Cause** : Les fonctions bash qui appellent `log_ok()` / `log_info()` (qui utilisent
+`echo -e "${GREEN}[crash-test]${NC}"`) polluent leur sortie stdout quand elles sont
+capturées avec `container_id=$(wait_for_agent_container)`. Le crochet `[` dans
+`[crash-test]` se retrouve dans la variable et est interprété comme une regex invalide
+par les appels `grep` ultérieurs.
+
+**Solution** : Rediriger tous les appels `log_*` vers stderr dans les fonctions capturées :
+```bash
+# Dans les fonctions dont la sortie est capturée avec $()
+log_ok "Container trouvé : ${container_id}" >&2   # stderr (affichage seulement)
+echo "$container_id"                               # stdout (valeur capturée)
+```
+
+**Fichier** : `scripts/test_crash_recovery.sh` — fonctions `wait_for_agent_container`,
+`create_test_issue`, `get_or_create_label`
+
+---
+
+### Problème : Anthropic retourne 403 (pas 401) si aucune clé API
+
+**Symptôme** : Le container agent se termine avec `"Anthropic API error 403"` au lieu
+du `401` attendu lors des tests sans clé réelle.
+
+**Cause** : Le proxy sidecar lit la clé depuis `/run/secrets/llm_api_key`. Si le fichier
+est absent (tests sans secrets montés), le proxy n'envoie aucun header `x-api-key`.
+L'API Anthropic retourne `403 Forbidden` pour les requêtes sans authentification
+(pas `401 Unauthorized`).
+
+**Impact** : Comportement attendu — le pipeline échoue proprement et écrit l'erreur
+dans `.task_error.json`. Le crash recovery fonctionne correctement.
+
+**Note** : Pour les tests de crash recovery, le container s'arrête naturellement
+en ~5s (échec de l'appel LLM). `KILL_DELAY=0` dans le script de test permet
+de kill avant que le sentinel soit écrit.

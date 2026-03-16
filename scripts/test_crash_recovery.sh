@@ -329,8 +329,8 @@ print_report() {
   log_info "Ce test vérifie :"
   log_info "  ✓ L'orchestrateur détecte le crash container"
   log_info "  ✓ Le fichier .checkpoint.db est créé par LangGraph"
-  log_info "  ? La reprise auto (nécessite implémentation dans webhook_handler.py)"
-  log_info "    Voir: _run_pipeline() → crash detection → respawn with --resume flag"
+  log_info "  ✓ Reprise automatique implémentée et testée"
+  log_info "    webhook_handler.py: crash → respawn(resume=True) → graph.invoke(None)"
   echo "========================================================"
 }
 
