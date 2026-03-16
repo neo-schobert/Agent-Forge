@@ -1,0 +1,28 @@
+# =============================================================================
+# AgentForge Orchestrator — Dépendances Python
+# =============================================================================
+
+# Serveur HTTP async
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+
+# HTTP client async
+httpx==0.27.2
+aiofiles==24.1.0
+
+# Validation des données / settings
+pydantic==2.10.3
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+
+# SDK Docker (pour spawner les containers)
+docker==7.1.0
+
+# Signature webhook HMAC
+cryptography==44.0.0
+
+# Logging structuré
+structlog==24.4.0
+
+# Utilitaires
+python-slugify==8.0.4

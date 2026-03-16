@@ -1,0 +1,201 @@
+# =============================================================================
+# AgentForge — Docker Compose Stack principale
+# Services : Forgejo, PostgreSQL x2, LangFuse, Orchestrateur
+# =============================================================================
+
+version: "3.9"
+
+networks:
+  agentforge_net:
+    name: ${DOCKER_NETWORK:-agentforge_net}
+    driver: bridge
+
+volumes:
+  postgres_forgejo_data:
+    name: agentforge_postgres_forgejo
+  forgejo_data:
+    name: agentforge_forgejo
+  postgres_langfuse_data:
+    name: agentforge_postgres_langfuse
+  langfuse_data:
+    name: agentforge_langfuse
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — Base de données Forgejo
+  # ---------------------------------------------------------------------------
+  postgres_forgejo:
+    image: postgres:15-alpine
+    container_name: agentforge_postgres_forgejo
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_FORGEJO_DB:-forgejo}
+      POSTGRES_USER: ${POSTGRES_FORGEJO_USER:-forgejo}
+      POSTGRES_PASSWORD: ${POSTGRES_FORGEJO_PASS:-forgejo_db_password_here}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_forgejo_data:/var/lib/postgresql/data
+    networks:
+      - agentforge_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_FORGEJO_USER:-forgejo} -d ${POSTGRES_FORGEJO_DB:-forgejo}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Forgejo — Forge Git self-hosted
+  # ---------------------------------------------------------------------------
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:7
+    container_name: agentforge_forgejo
+    restart: unless-stopped
+    depends_on:
+      postgres_forgejo:
+        condition: service_healthy
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      FORGEJO__database__DB_TYPE: postgres
+      FORGEJO__database__HOST: postgres_forgejo:5432
+      FORGEJO__database__NAME: ${POSTGRES_FORGEJO_DB:-forgejo}
+      FORGEJO__database__USER: ${POSTGRES_FORGEJO_USER:-forgejo}
+      FORGEJO__database__PASSWD: ${POSTGRES_FORGEJO_PASS:-forgejo_db_password_here}
+      FORGEJO__server__DOMAIN: ${FORGEJO_DOMAIN:-localhost}
+      FORGEJO__server__HTTP_PORT: "3000"
+      FORGEJO__server__ROOT_URL: "http://${FORGEJO_DOMAIN:-localhost}:${FORGEJO_PORT:-3000}/"
+      FORGEJO__security__INSTALL_LOCK: "true"
+      FORGEJO__security__SECRET_KEY: ${FORGEJO_WEBHOOK_SECRET:-change_this_secret}
+      FORGEJO__log__LEVEL: Info
+      FORGEJO__webhook__ALLOWED_HOST_LIST: "*"
+      FORGEJO__webhook__SKIP_TLS_VERIFY: "true"
+    volumes:
+      - forgejo_data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "${FORGEJO_PORT:-3000}:3000"
+      - "2222:22"
+    networks:
+      - agentforge_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — Base de données LangFuse
+  # ---------------------------------------------------------------------------
+  postgres_langfuse:
+    image: postgres:15-alpine
+    container_name: agentforge_postgres_langfuse
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_LANGFUSE_DB:-langfuse}
+      POSTGRES_USER: ${POSTGRES_LANGFUSE_USER:-langfuse}
+      POSTGRES_PASSWORD: ${POSTGRES_LANGFUSE_PASS:-langfuse_db_password_here}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_langfuse_data:/var/lib/postgresql/data
+    networks:
+      - agentforge_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_LANGFUSE_USER:-langfuse} -d ${POSTGRES_LANGFUSE_DB:-langfuse}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # LangFuse — Tracing & observabilité self-hosted
+  # ---------------------------------------------------------------------------
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: agentforge_langfuse
+    restart: unless-stopped
+    depends_on:
+      postgres_langfuse:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://${POSTGRES_LANGFUSE_USER:-langfuse}:${POSTGRES_LANGFUSE_PASS:-langfuse_db_password_here}@postgres_langfuse:5432/${POSTGRES_LANGFUSE_DB:-langfuse}"
+      NEXTAUTH_URL: "http://${FORGEJO_DOMAIN:-localhost}:${LANGFUSE_PORT:-3010}"
+      NEXTAUTH_SECRET: ${LANGFUSE_SECRET_KEY:-change_this_langfuse_secret_key}
+      SALT: ${LANGFUSE_SALT:-change_this_langfuse_salt}
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_DEFAULT_PROJECT_NAME: agentforge
+      LANGFUSE_DEFAULT_PROJECT_ROLE: OWNER
+    volumes:
+      - langfuse_data:/app/.next/cache
+    ports:
+      - "${LANGFUSE_PORT:-3010}:3000"
+    networks:
+      - agentforge_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/public/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # Orchestrateur Python — Cœur du système
+  # Reçoit les webhooks, spawn les Kata Containers, gère le cycle de vie
+  # ---------------------------------------------------------------------------
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    container_name: agentforge_orchestrator
+    restart: unless-stopped
+    depends_on:
+      forgejo:
+        condition: service_healthy
+      langfuse:
+        condition: service_healthy
+    environment:
+      # Forgejo
+      FORGEJO_BASE_URL: "http://forgejo:3000"
+      FORGEJO_API_TOKEN: ${FORGEJO_API_TOKEN:-}
+      FORGEJO_ADMIN_USER: ${FORGEJO_ADMIN_USER:-admin}
+      FORGEJO_ADMIN_PASS: ${FORGEJO_ADMIN_PASS:-changeme_strong_password_here}
+      FORGEJO_WEBHOOK_SECRET: ${FORGEJO_WEBHOOK_SECRET:-change_this_webhook_secret}
+      FORGEJO_WORKSPACE_REPO: ${FORGEJO_WORKSPACE_REPO:-agentforge-workspace}
+      # LangFuse
+      LANGFUSE_HOST: "http://langfuse:3000"
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY_API: ${LANGFUSE_SECRET_KEY_API:-}
+      # Agent runtime
+      AGENT_IMAGE: agentforge_agent_runtime:latest
+      WORKSPACES_DIR: ${WORKSPACES_DIR:-/workspaces}
+      TASK_TIMEOUT_SECONDS: ${TASK_TIMEOUT_SECONDS:-1800}
+      KATA_VCPUS: ${KATA_VCPUS:-2}
+      KATA_RAM_MB: ${KATA_RAM_MB:-2048}
+      KATA_DISK_GB: ${KATA_DISK_GB:-10}
+      # Proxy
+      PROXY_PORT: ${PROXY_PORT:-8877}
+      PROXY_IMAGE: agentforge_proxy:latest
+      # Orchestrateur
+      ORCHESTRATOR_PORT: ${ORCHESTRATOR_PORT:-8000}
+      LOG_LEVEL: INFO
+    volumes:
+      # Accès au socket Docker pour spawner les containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Dossier workspaces partagé entre orchestrateur et containers agents
+      - ${WORKSPACES_DIR:-/tmp/agentforge-workspaces}:/workspaces
+      # Secret LLM key monté en read-only (jamais dans les variables d'env agents)
+      - ./secrets:/run/secrets:ro
+    ports:
+      - "${ORCHESTRATOR_PORT:-8000}:8000"
+    networks:
+      - agentforge_net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
