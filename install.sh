@@ -34,6 +34,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
 REQUIRED_RAM_MB=4096
 MIN_DISK_GB=20
+COMPOSE=""  # Set in detect_compose(); used everywhere
 
 # =============================================================================
 # ÉTAPE 0 — Vérifications prérequis
@@ -178,8 +179,8 @@ install_docker() {
   fi
 
   # Vérification Docker Compose (plugin v2)
-  if docker compose version &>/dev/null; then
-    log_ok "Docker Compose v2 disponible"
+  if docker compose version &>/dev/null 2>&1; then
+    log_ok "Docker Compose v2 disponible : $(docker compose version --short 2>/dev/null || true)"
   elif command -v docker-compose &>/dev/null; then
     log_ok "docker-compose (legacy) disponible"
   else
@@ -188,11 +189,26 @@ install_docker() {
     log_ok "Docker Compose installé"
   fi
 
+  # Détecter et stocker la commande compose dans la variable globale COMPOSE
+  detect_compose
+
   # Test
   docker run --rm hello-world &>/dev/null && log_ok "Docker fonctionne correctement"
 
   # Buildx
   install_buildx
+}
+
+detect_compose() {
+  if docker compose version &>/dev/null 2>&1; then
+    COMPOSE="docker compose"
+  elif command -v docker-compose &>/dev/null; then
+    COMPOSE="docker-compose"
+  else
+    log_error "Ni 'docker compose' ni 'docker-compose' ne sont disponibles."
+    exit 1
+  fi
+  log_info "Commande compose : ${COMPOSE}"
 }
 
 # =============================================================================
@@ -440,19 +456,19 @@ start_stack() {
 
   # Démarrer sans l'orchestrateur d'abord (Forgejo et LangFuse doivent être up)
   log_info "Démarrage PostgreSQL + Forgejo + LangFuse..."
-  docker compose up -d postgres_forgejo postgres_langfuse forgejo langfuse
+  $COMPOSE up -d postgres_forgejo postgres_langfuse forgejo langfuse
 
   # Attendre que Forgejo soit healthy
   log_info "Attente que Forgejo soit prêt (peut prendre 60s)..."
   TIMEOUT=120
   ELAPSED=0
-  while ! docker compose exec -T forgejo \
+  while ! docker exec agentforge_forgejo \
     curl -sf http://localhost:3000/api/healthz &>/dev/null; do
     sleep 5
     ELAPSED=$((ELAPSED + 5))
     if [[ ${ELAPSED} -ge ${TIMEOUT} ]]; then
       log_error "Forgejo n'a pas démarré après ${TIMEOUT}s"
-      docker compose logs forgejo | tail -20
+      $COMPOSE logs forgejo | tail -20
       exit 1
     fi
     log_info "  ... attente (${ELAPSED}/${TIMEOUT}s)"
@@ -462,8 +478,8 @@ start_stack() {
   # Attendre LangFuse
   log_info "Attente que LangFuse soit prêt..."
   ELAPSED=0
-  while ! docker compose exec -T langfuse \
-    curl -sf http://localhost:3000/api/public/health &>/dev/null; do
+  while ! docker exec agentforge_langfuse \
+    wget -qO- "http://$(docker exec agentforge_langfuse hostname 2>/dev/null || echo localhost):3000/api/public/health" &>/dev/null; do
     sleep 5
     ELAPSED=$((ELAPSED + 5))
     if [[ ${ELAPSED} -ge ${TIMEOUT} ]]; then
@@ -498,7 +514,7 @@ start_orchestrator() {
   log_step "Démarrage de l'orchestrateur"
   cd "${SCRIPT_DIR}"
 
-  docker compose up -d orchestrator
+  $COMPOSE up -d orchestrator
 
   log_info "Attente que l'orchestrateur soit prêt..."
   TIMEOUT=60
