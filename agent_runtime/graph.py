@@ -135,9 +135,15 @@ def build_graph(llm: BaseChatModel, workspace_path: str) -> StateGraph:
 
     # -------------------------------------------------------------------------
     # Configurer le checkpointing (SqliteSaver)
+    # LangGraph 1.x : SqliteSaver.from_conn_string() retourne un context manager.
+    # On doit l'utiliser via __enter__ pour le threading correct.
     # -------------------------------------------------------------------------
     checkpoint_path = os.path.join(workspace_path, ".checkpoint.db")
-    checkpointer = SqliteSaver.from_conn_string(checkpoint_path)
+
+    # Ouvrir la connexion avec check_same_thread=False pour le threading LangGraph
+    import sqlite3
+    conn = sqlite3.connect(checkpoint_path, check_same_thread=False)
+    checkpointer = SqliteSaver(conn)
 
     # Compiler le graphe avec checkpointing
     compiled = graph.compile(checkpointer=checkpointer)

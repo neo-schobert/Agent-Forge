@@ -135,7 +135,8 @@ def setup_langfuse_tracing():
         return None
 
     try:
-        from langfuse.callback import CallbackHandler
+        # LangFuse v4 : callback handler dans langfuse.langchain
+        from langfuse.langchain import CallbackHandler
         handler = CallbackHandler(
             host=langfuse_host,
             public_key=public_key,
@@ -144,7 +145,7 @@ def setup_langfuse_tracing():
         logger.info("langfuse_tracing_enabled", host=langfuse_host)
         return handler
     except ImportError:
-        logger.warning("langfuse_not_installed")
+        logger.warning("langfuse_not_installed_or_old_api")
         return None
     except Exception as e:
         logger.warning("langfuse_setup_failed", error=str(e))
