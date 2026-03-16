@@ -3,8 +3,6 @@
 # Services : Forgejo, PostgreSQL x2, LangFuse, Orchestrateur
 # =============================================================================
 
-version: "3.9"
-
 networks:
   agentforge_net:
     name: ${DOCKER_NETWORK:-agentforge_net}
@@ -81,7 +79,7 @@ services:
     networks:
       - agentforge_net
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/healthz || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/healthz >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -136,7 +134,7 @@ services:
     networks:
       - agentforge_net
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/public/health || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/public/health >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -156,7 +154,7 @@ services:
       forgejo:
         condition: service_healthy
       langfuse:
-        condition: service_healthy
+        condition: service_started   # LangFuse healthy mais wget peut être absent dans certaines versions
     environment:
       # Forgejo
       FORGEJO_BASE_URL: "http://forgejo:3000"
@@ -173,6 +171,7 @@ services:
       AGENT_IMAGE: agentforge_agent_runtime:latest
       WORKSPACES_DIR: ${WORKSPACES_DIR:-/workspaces}
       TASK_TIMEOUT_SECONDS: ${TASK_TIMEOUT_SECONDS:-1800}
+      KATA_AVAILABLE: ${KATA_AVAILABLE:-false}
       KATA_VCPUS: ${KATA_VCPUS:-2}
       KATA_RAM_MB: ${KATA_RAM_MB:-2048}
       KATA_DISK_GB: ${KATA_DISK_GB:-10}
@@ -194,7 +193,7 @@ services:
     networks:
       - agentforge_net
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
