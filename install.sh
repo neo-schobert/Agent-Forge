@@ -438,6 +438,10 @@ DOCKERFILE
   log_info "Build image proxy..."
   docker build -t agentforge_proxy:latest ./proxy/ -q
 
+  log_info "Build image dashboard (React + FastAPI)..."
+  $COMPOSE build dashboard
+  log_ok "Image dashboard construite"
+
   log_ok "Images Docker construites"
 }
 
@@ -530,12 +534,34 @@ start_orchestrator() {
   log_ok "Orchestrateur prêt"
 }
 
+start_dashboard() {
+  log_step "Démarrage du dashboard"
+  cd "${SCRIPT_DIR}"
+
+  $COMPOSE up -d dashboard
+
+  log_info "Attente que le dashboard soit prêt (build React inclus, 60s max)..."
+  TIMEOUT=120
+  ELAPSED=0
+  while ! curl -sf "http://localhost:${DASHBOARD_PORT:-3020}/api/health" &>/dev/null; do
+    sleep 5
+    ELAPSED=$((ELAPSED + 5))
+    if [[ ${ELAPSED} -ge ${TIMEOUT} ]]; then
+      log_warn "Dashboard pas encore prêt — vérifier avec : $COMPOSE logs dashboard"
+      return 0
+    fi
+    log_info "  ... attente dashboard (${ELAPSED}/${TIMEOUT}s)"
+  done
+  log_ok "Dashboard prêt"
+}
+
 # =============================================================================
 # ÉTAPE 9 — Résumé final
 # =============================================================================
 print_summary() {
   source "${ENV_FILE}"
   local domain="${FORGEJO_DOMAIN:-localhost}"
+  local dash_port="${DASHBOARD_PORT:-3020}"
   local forgejo_port="${FORGEJO_PORT:-3000}"
   local langfuse_port="${LANGFUSE_PORT:-3010}"
   local orch_port="${ORCHESTRATOR_PORT:-8000}"
@@ -546,19 +572,23 @@ print_summary() {
   echo "  ║          AgentForge installé avec succès !            ║"
   echo "  ╚═══════════════════════════════════════════════════════╝"
   echo -e "${NC}"
+  echo -e "${GREEN}[OK]${NC} Dashboard     : http://${domain}:${dash_port}   ${BOLD}← COMMENCER ICI${NC}"
   echo -e "${GREEN}[OK]${NC} Forgejo       : http://${domain}:${forgejo_port}"
   echo -e "${GREEN}[OK]${NC} LangFuse      : http://${domain}:${langfuse_port}"
   echo -e "${GREEN}[OK]${NC} Orchestrateur : http://${domain}:${orch_port}/health"
+  echo ""
+  echo -e "${BOLD}→ Ouvrir le dashboard pour configurer les clés API et lancer une tâche.${NC}"
   echo ""
   echo -e "${BOLD}Pour lancer une tâche de test :${NC}"
   echo "  make test-task"
   echo ""
   echo -e "${BOLD}Logs :${NC}"
-  echo "  make logs        # tous les services"
-  echo "  make logs-orch   # orchestrateur uniquement"
+  echo "  make logs          # tous les services"
+  echo "  make logs-orch     # orchestrateur uniquement"
+  echo "  $COMPOSE logs dashboard --tail=50"
   echo ""
   echo -e "${BOLD}Identifiants Forgejo :${NC}"
-  echo "  Utilisateur : ${FORGEJO_ADMIN_USER:-admin}"
+  echo "  Utilisateur : ${FORGEJO_ADMIN_USER:-agentforge}"
   echo "  URL         : http://${domain}:${forgejo_port}"
   echo ""
 }
@@ -585,6 +615,7 @@ main() {
   init_forgejo
   init_langfuse
   start_orchestrator
+  start_dashboard
   print_summary
 }
 
