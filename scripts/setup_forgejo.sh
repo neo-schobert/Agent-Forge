@@ -35,9 +35,11 @@ FORGEJO_WORKSPACE_REPO="${FORGEJO_WORKSPACE_REPO:-agentforge-workspace}"
 ORCHESTRATOR_PORT="${ORCHESTRATOR_PORT:-8000}"
 WEBHOOK_SECRET="${FORGEJO_WEBHOOK_SECRET:-change_this_webhook_secret}"
 
-# URL API interne (depuis le host, pas depuis le container)
-# En mode install.sh, Forgejo tourne sur localhost:FORGEJO_PORT
-FORGEJO_API="${FORGEJO_BASE_URL}/api/v1"
+# URL locale pour les appels API depuis le host.
+# Sur certains VPS, l'IP publique (FORGEJO_DOMAIN) n'est pas accessible
+# en loopback (hairpin NAT absent). On utilise localhost:PORT à la place.
+FORGEJO_LOCAL_URL="http://localhost:${FORGEJO_PORT}"
+FORGEJO_API="${FORGEJO_LOCAL_URL}/api/v1"
 
 # =============================================================================
 # Helpers HTTP
@@ -65,14 +67,14 @@ forgejo_curl() {
 # Vérification que Forgejo répond
 wait_forgejo() {
   local max=240 elapsed=0
-  log_info "Vérification que Forgejo répond sur ${FORGEJO_BASE_URL}..."
+  log_info "Vérification que Forgejo répond sur ${FORGEJO_LOCAL_URL}..."
   while true; do
-    # Essai 1 : URL externe via curl ou wget
-    if curl -sf "${FORGEJO_BASE_URL}/api/healthz" &>/dev/null \
-    || wget -qO- "${FORGEJO_BASE_URL}/api/healthz" &>/dev/null; then
+    # Essai 1 : URL locale (localhost) — contourne le problème de hairpin NAT
+    if curl -sf "${FORGEJO_LOCAL_URL}/api/healthz" &>/dev/null \
+    || wget -qO- "${FORGEJO_LOCAL_URL}/api/healthz" &>/dev/null; then
       break
     fi
-    # Essai 2 : accès interne via docker exec (plus fiable au démarrage)
+    # Essai 2 : accès interne via docker exec (fallback si port non encore lié)
     if docker exec agentforge_forgejo \
         curl -sf http://localhost:3000/api/healthz &>/dev/null 2>&1; then
       log_info "Forgejo répond en interne — API prête"
