@@ -110,6 +110,19 @@ class ContainerManager:
 
         container_name = f"agentforge_task_{task_id}"
 
+        # Crash recovery: remove old container with same name (killed/exited) before respawn
+        if resume:
+            try:
+                old_container = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: self.docker_client.containers.get(container_name)
+                )
+                await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: old_container.remove(force=True)
+                )
+                log.info("old_container_removed_for_respawn", name=container_name)
+            except Exception:
+                pass  # Container doesn't exist or already removed — fine
+
         try:
             # Lancer le proxy sidecar EN PREMIER dans le même container
             # (En pratique, on lance agent_runtime qui démarre le proxy en interne)

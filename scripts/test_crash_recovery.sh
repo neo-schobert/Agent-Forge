@@ -34,7 +34,7 @@ FORGEJO_USER="${FORGEJO_ADMIN_USER:-agentforge}"
 FORGEJO_REPO="${FORGEJO_WORKSPACE_REPO:-agentforge-workspace}"
 ORCHESTRATOR_URL="${ORCHESTRATOR_URL:-http://localhost:8000}"
 MAX_WAIT=60       # Secondes max pour attendre le container
-KILL_DELAY=8      # Secondes après spawn avant de kill
+KILL_DELAY=0      # Secondes après spawn avant de kill (0 = immédiat, pour tests sans API key)
 RESUME_WAIT=120   # Secondes max pour attendre la reprise
 
 # ---------------------------------------------------------------------------
@@ -103,7 +103,7 @@ for l in labels:
 " 2>/dev/null || echo "")
 
   if [[ -z "$label_id" ]]; then
-    log_info "Création du label agent-task..."
+    log_info "Création du label agent-task..." >&2
     local resp
     resp=$(forgejo_api POST "/repos/${FORGEJO_USER}/${FORGEJO_REPO}/labels" \
       -d '{"name":"agent-task","color":"#0075ca","description":"Tâche agent IA"}')
@@ -121,7 +121,7 @@ for l in labels:
 # ---------------------------------------------------------------------------
 create_test_issue() {
   local label_id="$1"
-  log_info "Création de l'issue de test..."
+  log_info "Création de l'issue de test..." >&2
 
   local resp
   resp=$(forgejo_api POST "/repos/${FORGEJO_USER}/${FORGEJO_REPO}/issues" \
@@ -138,7 +138,7 @@ create_test_issue() {
     fail "Impossible de créer l'issue de test"
   fi
 
-  log_ok "Issue #${issue_number} créée"
+  log_ok "Issue #${issue_number} créée" >&2
   echo "$issue_number"
 }
 
@@ -149,23 +149,28 @@ wait_for_agent_container() {
   local issue_number="$1"
   local elapsed=0
 
-  log_info "Attente du container agent (issue #${issue_number})..."
+  log_info "Attente du container agent (issue #${issue_number})..." >&2
 
   while [[ $elapsed -lt $MAX_WAIT ]]; do
-    # Chercher un container avec le label issue_number
+    # Chercher le container agent par son nom (agentforge_task_*)
     local container_id
     container_id=$(docker ps --format '{{.ID}} {{.Names}}' 2>/dev/null | \
-      grep "agentforge_task_" | head -1 | awk '{print $1}' || echo "")
+      awk '/agentforge_task_/{print $1}' | head -1 || echo "")
 
     if [[ -n "$container_id" ]]; then
-      log_ok "Container agent trouvé : ${container_id}"
+      local container_name
+      container_name=$(docker ps --format '{{.Names}}' -f "id=${container_id}" 2>/dev/null | head -1)
+      log_ok "Container agent trouvé : ${container_id} (${container_name})" >&2
+      # Only echo the container ID to stdout (for capture)
       echo "$container_id"
       return 0
     fi
 
-    sleep 2
-    elapsed=$((elapsed + 2))
-    log_info "  ... attente (${elapsed}/${MAX_WAIT}s)"
+    sleep 1
+    elapsed=$((elapsed + 1))
+    if [[ $((elapsed % 2)) -eq 0 ]]; then
+      log_info "  ... attente (${elapsed}/${MAX_WAIT}s)" >&2
+    fi
   done
 
   fail "Aucun container agent détecté après ${MAX_WAIT}s"
